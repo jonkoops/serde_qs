@@ -2,9 +2,9 @@
 //!
 //! Enable with the `axum` feature.
 
-use axum_framework as axum;
+use axum_framework::{self as axum, async_trait, body::Bytes, extract::{FromRequest, Request}};
 
-use std::sync::Arc;
+use std::{error::Error, sync::Arc};
 
 use crate::de::Config as QsConfig;
 use crate::error::Error as QsError;
@@ -223,6 +223,42 @@ impl Default for QsQueryConfig {
             max_depth: 5,
             strict: true,
             error_handler: None,
+        }
+    }
+}
+
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+/// Extract typed information from from the request's form data.
+#[derive(Debug)]
+pub struct QsForm<T>(T);
+
+#[async_trait]
+impl<T, S> FromRequest<S> for QsForm<T>
+where
+    T: serde::de::DeserializeOwned,
+    Bytes: FromRequest<S>,
+    S: Send + Sync,
+{
+    type Rejection = QsQueryRejection;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let Extension(qs_config) = Extension::<QsQueryConfig>::from_request(req, state)
+            .await
+            .unwrap_or_else(|_| Extension(QsQueryConfig::default()));
+        let error_handler = qs_config.error_handler.clone();
+        let config: QsConfig = qs_config.into();
+        let body = Bytes::from_request(req, state)
+            .await
+            .map_err(|err| QsQueryRejection::new(err, StatusCode::BAD_REQUEST))?;
+        
+
+        match config.deserialize_bytes::<T>(&body) {
+            Ok(value) => Ok(QsForm(value)),
+            Err(err) => match error_handler {
+                Some(handler) => Err((handler)(err)),
+                None => Err(QsQueryRejection::new(err, StatusCode::BAD_REQUEST)),
+            },
         }
     }
 }
